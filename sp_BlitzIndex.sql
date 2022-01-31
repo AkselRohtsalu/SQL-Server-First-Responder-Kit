@@ -991,6 +991,52 @@ SELECT  1, 0 ,
         i.Reason, '', '', ''
 FROM #Ignore_Databases i;
 
+/*AO last failover time*/
+IF ((@@version like 'Microsoft SQL Server %') and (SERVERPROPERTY ('IsHadrEnabled') = 1) and (@GetAllDatabases = 0))
+BEGIN 
+	DECLARE @CurrentDBReplicaStatus NVARCHAR(10);
+	DECLARE @CurrentAOReplicaUptime NVARCHAR(100);
+	DECLARE @CurrentAOGrupName NVARCHAR(100);
+	SET @CurrentAOReplicaUptime='';
+	SELECT 
+		@CurrentAOGrupName=Groups.name
+		,@CurrentDBReplicaStatus = CASE 
+			When primary_replica = @@Servername THEN 'PRIMARY'
+			When primary_replica != @@Servername THEN 'SECONDARY'
+		END 
+	FROM sys.dm_hadr_availability_group_states States
+	INNER JOIN master.sys.availability_groups Groups ON States.group_id = Groups.group_id
+	INNER JOIN sys.availability_databases_cluster AGDatabases ON Groups.group_id = AGDatabases.group_id
+	where AGDatabases.database_name=@DatabaseName;
+
+	IF @CurrentDBReplicaStatus is not null
+	BEGIN
+		DECLARE @ErrorLogCount TINYINT;
+		IF OBJECT_ID('tempdb..#ErrorLogsFiles') IS NOT NULL DROP TABLE #ErrorLogsFiles;
+		CREATE TABLE #ErrorLogsFiles (LogID TINYINT, LogDate  DATETIME, LogSize INT);
+		INSERT INTO #ErrorLogsFiles EXEC sys.sp_enumerrorlogs
+		SELECT @ErrorLogCount=@@ROWCOUNT;
+
+		DECLARE @LogFileCount TINYINT 
+		DECLARE @MissingAOString NVARCHAR(100)
+		IF OBJECT_ID('tempdb..#TempErrorLog') IS NOT NULL DROP TABLE #TempErrorLog;
+		CREATE TABLE #TempErrorLog  (LogDate DATETIME,ProcessInfo NVARCHAR(50),[Text] NVARCHAR(2000))
+		SET @MissingAOString='The availability group database "'+@DatabaseName+'" is changing roles from "RESOLVING" to "'+@CurrentDBReplicaStatus+'"'
+		SET @LogFileCount=0
+		WHILE (@LogFileCount<@ErrorLogCount )
+			BEGIN 
+			INSERT INTO #TempErrorLog
+			EXEC sp_readerrorlog  @LogFileCount,1, @MissingAOString
+			IF @@ROWCOUNT>0 SET @LogFileCount=@ErrorLogCount
+			SET @LogFileCount = @LogFileCount+1
+			END
+
+	SELECT TOP 1
+		@CurrentAOReplicaUptime ='; AO Grupp ' + @CurrentAOGrupName + ' uptime: ' + CAST(CAST(DATEDIFF(HOUR, LogDate, GETDATE()) / 24. AS NUMERIC (23,2)) AS NVARCHAR(10))  FROM #TempErrorLog
+	ORDER BY LogDate DESC
+	END
+END
+
 
 /* Last startup */
 IF COLUMNPROPERTY(OBJECT_ID('sys.dm_os_sys_info'),'sqlserver_start_time','ColumnID') IS NOT NULL
@@ -1008,7 +1054,7 @@ END
 IF @DaysUptime = 0 OR @DaysUptime IS NULL 
   SET @DaysUptime = .01;
 
-SELECT @DaysUptimeInsertValue = 'Server: ' + (CONVERT(VARCHAR(256), (SERVERPROPERTY('ServerName')))) + ' Days Uptime: ' + RTRIM(@DaysUptime);
+SELECT @DaysUptimeInsertValue = 'Server: ' + (CONVERT(VARCHAR(256), (SERVERPROPERTY('ServerName')))) + ' Days Uptime: ' + RTRIM(@DaysUptime) + @CurrentAOReplicaUptime;
 
 
 /* Permission granted or unnecessary? Ok, let's go! */
